@@ -20,3 +20,25 @@ chmod 777 "$resultsDirectory"
 # Pick FASTQ file for this array task
 fastqFile=$(ls ${fastqDir}*.fastq.gz | sed -n "$((SLURM_ARRAY_TASK_ID+1))p")
 sampleName=$(basename "$fastqFile" .fastq.gz)
+
+# Singularity containers
+STAR_SIF="${baseDirectory}star-alignment_latest.sif"
+SAMTOOLS_SIF="${baseDirectory}samtools_latest.sif"
+
+echo "Running STAR for sample: $sampleName"
+
+# Run STAR inside Singularity
+singularity exec --bind "${baseDirectory}:${baseDirectory}" "$STAR_SIF" STAR \
+  --runThreadN 2 \
+  --genomeDir "${baseDirectory}yeastGenomeIndex" \
+  --readFilesCommand zcat \
+  --readFilesIn "$fastqFile" \
+  --outFileNamePrefix "${resultsDirectory}${sampleName}_" \
+  --outSAMtype BAM SortedByCoordinate
+
+# Index BAM file
+echo "Indexing BAM for sample: $sampleName"
+singularity exec --bind "${baseDirectory}:${baseDirectory}" "$SAMTOOLS_SIF" samtools index \
+  "${resultsDirectory}${sampleName}_Aligned.sortedByCoord.out.bam"
+
+echo "End of sample: $sampleName"
