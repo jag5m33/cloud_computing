@@ -18,3 +18,13 @@ GENOME_INDEX=/scratch/grp/msc_appbio/containersPipelines/svj_grp/E-MTAB-7657_cle
 GTF_FILE=/scratch/grp/msc_appbio/containersPipelines/svj_grp/E-MTAB-7657_clean/yeastGenome/Saccharomyces_cerevisiae.R64-1-1.110.NCnam
 es.gtf
 OUTPUT_DIR=/scratch/grp/msc_appbio/containersPipelines/svj_grp/E-MTAB-7657_clean/tophat_results
+
+# Get the filename corresponding to the SLURM_ARRAY_TASK_ID
+FASTQ_FILE=$(ls $FASTQ_DIR/*.fastq.gz | sed -n "${SLURM_ARRAY_TASK_ID}p")
+BASENAME=$(basename $FASTQ_FILE .fastq.gz)
+
+# Make output directory for this sample
+mkdir -p $OUTPUT_DIR/$BASENAME
+
+# Run TopHat
+tophat -G $GTF_FILE -o $OUTPUT_DIR/$BASENAME $GENOME_INDEX $FASTQ_FILE
