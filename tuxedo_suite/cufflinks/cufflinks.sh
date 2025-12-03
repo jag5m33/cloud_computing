@@ -20,3 +20,21 @@ BAMDIR=/scratch/grp/msc_appbio/containersPipelines/svj_grp/E-MTAB-7657_clean/to
 phat_results
 
 mkdir -p $OUTDIR
+
+
+# Loop over all BAM files
+for BAM in $BAMDIR/*/accepted_hits.bam; do
+    SAMPLE=$(basename $(dirname $BAM))
+    SAMPLE_OUT=$OUTDIR/$SAMPLE
+    mkdir -p $SAMPLE_OUT
+
+    echo "Running Cufflinks on sample $SAMPLE"
+
+    cufflinks \
+      --upper-quartile-norm \
+      --mask-file $MASK \
+      -G $GTF \
+      -p 8 \
+      -o $SAMPLE_OUT \
+      $BAM
+done
