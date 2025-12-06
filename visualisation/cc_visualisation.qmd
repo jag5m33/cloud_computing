@@ -1,0 +1,308 @@
+---
+title: "cc_visualising"
+format: html
+---
+
+```{r}
+#install all necessary packages 
+BiocManager::install((version="3.22"))
+install.packages("BiocManager")
+
+
+library(VennDiagram)
+library(tidyverse)
+library(readr)
+library(dplyr)
+
+BiocManager::install("org.Sc.sgd.db")
+library(org.Sc.sgd.db)
+install.packages("pheatmap")
+
+#set working directory to SCP'd files location (from HPC)
+setwd("~/results_cloud_computing")
+
+```
+
+#ESTABLISHING FILE PATHWAYS 
+- navigate through the local directory (from my machine) to locate the SCP'd files from the HPC post alignment.
+```{r}
+
+#file pathway for DEG data
+file_path <- "C:/Users/jagmeet/results_cloud_computing/DEG/gene_exp_14vs26.diff"
+diff_data14vs26 <- read.delim(
+    file = file_path, 
+    header = TRUE, 
+    sep = "\t", 
+    stringsAsFactors = FALSE
+)
+
+#file pathways for FPKM6v14
+file_path_1 <- "C:/Users/jagmeet/results_cloud_computing/FPKM2/fpkm6v14"
+
+FPKM6v14 <- read.table(
+    file = file_path_1, 
+    header = TRUE, 
+    sep = "\t",  # Instructs R to use any whitespace (spaces/tabs) as the delimiter
+    stringsAsFactors = FALSE 
+)
+
+#file pathways for FPKM14v26
+file_path_2 <- "C:/Users/jagmeet/results_cloud_computing/FPKM2/fpkm26"
+
+FPKM14v26 <- read.table(
+    file = file_path_2, 
+    header = TRUE, 
+    sep = "\t",  # Instructs R to use any whitespace (spaces/tabs) as the delimiter
+    stringsAsFactors = FALSE 
+)
+
+# file pathway for genome annotation file:
+file_path <- "C:/Users/jagmeet/results_cloud_computing/gene_association.sgd.gaf" 
+
+go_annotation <- read_tsv(
+    file = file_path, 
+    col_names = FALSE,       
+    comment = "!", # Skips some unnecessary metadata lines + keep info lines
+    show_col_types = FALSE   
+)
+```
+
+
+# File cleaning and normalisation
+  - Pull out all information from GO_annotation file - regarding gluconeogenesis (via code given in paper - GO: 0006094)
+    - the file contained columns headers with prefix 'X' - so we will index and work with those.
+    
+    # org.Sc.sgd.db - library required for using and converting ORF_id to gene_id - in 
+
+```{r}
+#Cleaning GO_annotation file
+gluconeo_common_names_all <- go_annotation %>%
+  mutate(
+    # X5 contains the GO Term ID (GO:0006094)
+    GO_Term_Check = trimws(X5), 
+    # X3 contains the Common Gene Name (e.g., GPC1)
+    Common_Name = trimws(X3) 
+  ) %>%
+  filter(GO_Term_Check == "GO:0006094") %>%
+  pull(Common_Name) %>%
+  unique()
+as.data.frame(gluconeo_common_names_all) # convert to dataframe for easier use
+
+#Cleaning DEG file (14v26) + normalise it
+deg_test_id <- diff_data14vs26 %>%
+  filter(q_value < 0.05) %>% 
+  pull(test_id) %>% 
+  trimws() %>% 
+  toupper() %>% # Force to uppercase 
+  unique()
+view (diff_data14vs26)
+## deg_common_names = ORF_ID's this does NOT match the go_annotation file SO CONVERT TO STANDARD GENE SYMBOLS
+
+test_id_to_gene_symbol <- mapIds(
+  org.Sc.sgd.db, # using the package to match up gene_id and OFD_id
+  keys = deg_test_id, 
+  keytype="ORF",
+  column="GENENAME", # use it to match with the genename
+  multiVals = "first"
+) 
+
+deg_table <- tibble( # create dataframe synonymous object - tibble 
+  test_id = names(test_id_to_gene_symbol), # column 1 - created using pre-existing object 
+  gene_symbol = toupper(unname(test_id_to_gene_symbol)) # column 2 - created using gene_symbol - origonal values from object and convert to upper case (normalise)
+) %>%
+  filter(!is.na(gene_symbol)) # check for any missing values (NA's) 
+```
+
+#FIND INTERSECTS
+created the deg_table gene_symbol column - this will have 17 gluconeogenesis genes of interest
+  - Check if there is an overlap in the 17 gene names with the cleaned gene ontology anatation file.
+
+```{r}
+
+final_17_genes <- intersect(deg_table$gene_symbol, gluconeo_common_names_all)
+final_17_genes <- as.list(final_17_genes)
+
+print(paste("Number of final genes for Plot C:", length(final_17_genes)))
+
+## all X3 common_names in go_annotation which correspond to GO:0006094 = filtered out + intersected with gene symbols in DEG
+
+# THIS SHOWED 17 INTERSECTS!! = this is TRUE
+
+#get test ID's
+
+test_ids <- deg_table %>%
+  filter(gene_symbol %in% final_17_genes) %>%
+  pull(test_id) %>%
+  trimws()
+# since the FPKM files do not have gene_symbol columns in the files, these must be cross referenced with the DEG file which has gene symbol and test_id (tracking_id in FPKM)
+  
+
+
+#length(test_ids)
+```
+
+# CREATING THE BRIDGE AND FINDING THE FPKM CORRESPONDING GENE DATA
+  1. import all FPKM files which have hours 6,14,26hr repetitions 
+  2. clean - matching up tracking_id with test_id's (ensuring the 17 gluconeogenesis genes exist in the FPKM files)
+  3. slect the following columns from the FPKM files:
+      tracking_id, 
+      condition, 
+      replicate, 
+      FPKM
+  4. create object: fpkm_long_clean which has data from cleaned FPKM files
+  5. create matrix format of FPKM to ensure that all data can be transposed easily. (for 3 conditions use reps 1-->3)
+  6. Z transform the data (according to PLOT1C)
+  7. transpose data for plotting in the next segment.
+
+
+```{r}
+#filter 6 and 14h data 
+FPKM6v14_clean <- FPKM6v14 %>%
+  filter(
+    tracking_id %in% test_ids, 
+    replicate %in% c(0,1,2) # select only the first 3 replicates
+  )%>%
+  dplyr::select(tracking_id, condition, replicate, FPKM)
+
+FPKM14v26_clean <- FPKM14v26 %>%
+  filter(
+    tracking_id %in% test_ids,
+    replicate %in% c(0,1,2),
+    condition == "26h" # only keep 26hr data from file
+  ) %>%
+  dplyr::select(tracking_id, condition, replicate, FPKM)
+
+
+fpkm_long_clean <- bind_rows(FPKM6v14_clean, FPKM14v26_clean)
+
+fpkm_long_clean<- fpkm_long_clean%>%
+  distinct(tracking_id, condition, replicate, .keep_all =TRUE)%>%
+  dplyr::left_join(
+    deg_table %>% dplyr::select(test_id, gene_symbol),
+    by = c("tracking_id" = "test_id")
+  )
+
+
+fpkm_heatmap_matrix <- fpkm_long_clean %>%
+  # Create the new column header names (e.g., "6h_rep1")
+  dplyr::mutate(
+    rep_col_name = paste0(condition, "_rep", replicate + 1)
+  ) %>%
+  #  new 'rep_col_name' to define the column headers
+  pivot_wider(
+    id_cols = c(tracking_id, gene_symbol), # Keep identifiers as rows
+    names_from = rep_col_name,            # Use the new descriptive headers
+    values_from = FPKM
+  )%>%
+  #Clean for matrix conversion
+  tibble::column_to_rownames(var = "gene_symbol") %>%
+  dplyr::select(-tracking_id)%>% ## remove the tracking iD its no longer needed - it was a reference link 
+  as.matrix()
+
+#head(fpkm_heatmap_matrix)
+
+
+
+```
+
+#BUILD PLOTC
+
+```{r}
+library(pheatmap)
+
+FPKM_scaled_matrix <-t(scale(t(fpkm_heatmap_matrix)))
+FPKM_scaled_matrix[is.na(FPKM_scaled_matrix)] <- 0
+FPKM_scaled_matrix[is.infinite(FPKM_scaled_matrix)] <- 0
+
+# order the rows of 17 genes according to figure 1C in the paper
+row_order <- c("TDH3", "FBA1", "GPM1", "TPI1", "PGI1", "ENO1", "PGK1", "TDH2", "FBP1", "ERT1", "SDL1", "GPM3", "GPM2","TDH1","MDH2","PYC1", "PCK1")
+#ensure the row_order matches with the order of the rows in the scaled matrix
+FPKM_ordered <- match(row_order, rownames(FPKM_scaled_matrix))
+
+# order the rows according to the object provided above.
+FPKM_scaled_matrix <- FPKM_scaled_matrix[FPKM_ordered, ]
+
+pheatmap(
+  FPKM_scaled_matrix,
+  cluster_rows = FALSE, 
+  cluster_cols= FALSE,
+  scale = "none",
+  fontsize = 8, 
+  main = "HeatMap (PLOTC - reproduced); Gluconeogenesis (GO: 0006094) condition scores"
+)
+
+
+
+```
+
+# generate plot B
+  1. import all files 
+  2. clean all files according to the requirements for PlotB (q_value significance) + unique test_ids
+  3. import library (Venn.diagram)
+  4. plot and save diagram as png.
+  
+
+
+```{r}
+file_path <- "C:/Users/jagmeet/results_cloud_computing/DEG/gene_exp_14vs26.diff"
+
+deg14v26 <- read.delim(
+    file = file_path, 
+    header = TRUE, 
+    sep = "\t", 
+    stringsAsFactors = FALSE
+)
+#view(deg14v26[1:10, ])
+
+deg14v26 <- deg14v26 %>%
+  filter(q_value <= 0.05) %>%
+  pull(test_id)%>%
+  unique()
+
+
+file_path <- "C:/Users/jagmeet/results_cloud_computing/DEG/gene_exp_6vs14.diff"
+deg6v14 <- read.delim(
+    file = file_path, 
+    header = TRUE, 
+    sep = "\t", 
+    stringsAsFactors = FALSE
+)
+
+deg6v14 <- deg6v14 %>%
+  filter(q_value<=0.05) %>%
+  pull(test_id)%>%
+  unique()
+
+file_path <- "C:/Users/jagmeet/results_cloud_computing/DEG/gene_exp_6vs26.diff"
+deg6v26 <- read.delim(
+    file = file_path, 
+    header = TRUE, 
+    sep = "\t", 
+    stringsAsFactors = FALSE
+)
+deg6v26 <- deg6v26 %>%
+  filter(q_value <= 0.05) %>%
+  pull(test_id)%>%
+  unique()
+
+
+venn.plot <- venn.diagram( 
+  x = list(deg6v26, deg6v14, deg14v26),
+  category.names = c("6h vs 26h", "6h vs 14h", "14h vs 26h"),
+  filename = "PlotB_VennDiagram_DEGs.png",
+  imagetype = "png",
+  #filename = NULL,
+  output = TRUE,
+  col = "transparent",
+  fill = c("#FFC0CB", "#00FF00", "#800080"),
+  alpha = 0.65,
+  cex = 1.5, 
+  cat.cex = 1.2
+)
+
+
+
+```
+
+
+    
