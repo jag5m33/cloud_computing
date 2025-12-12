@@ -1,0 +1,602 @@
+---
+title: "cc_appendix"
+output: word_document
+date: "2025-12-09"
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE)
+
+```
+
+
+1. wget fastq files, extract links to fastq files(from 20th column in sdrf txt file and store in new file) and unzip all
+2. wget reference genome and unzip as well
+ 
+
+```{bash, eval=FALSE}
+#create working directory cloud_computing to work from 
+mkdir cloud_computing
+ls
+
+#create fastq directory 
+mkdir fastq
+ls
+
+# Step 1 - the fastq files into the fastq directory
+wget https://www.ebi.ac.uk/arrayexpress/files/E-MTAB-7657/E-MTAB-7657.sdrf.txt
+
+cat E-MTAB-7657.sdrf.txt | cut -f20|tail -n+2 > links2download.txt
+
+wget -N -i links2download.txt
+gunzip *.fastq.gz
+
+#create yeastGenome directory 
+mkdir yeastGenome
+ls
+
+# Step 2
+wget ftp://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/146/045/GCF_000146045.2_ASM14604v2/GCF_000146045.2_ASM14604v2_genomic.fna.gz
+
+gunzip GCF_000146045.2_ASM14604v2_genomic.fna.gz
+
+
+```
+
+3. ensure both the fastq files and reference genome are placed in the cloud_computing directory and SCP into the HPC
+
+```{bash, eval=FALSE}
+scp -r /c/Users/jagmeet/cloud_computing k22031154@hpc.create.kcl.ac.uk:/scratch/grp/msc_appbio/containersPipelines/svj_grp/
+
+#from the HPC svj_grp directory - rename directory
+mv /scratch/grp/msc_appbio/containersPipelines/svj_grp/cloud_computing /scratch/grp/msc_appbio/containersPipelines/svj_grp/E-MTAB-7657_clean
+
+```
+
+4. create conda environment  + activate conda environment
+	a. install bowtie2 (2.1.1)
+	b. install TopHat (2.0.14)
+	c. install cufflinks (including cuffdiff) - specify version 
+
+```{bash, eval=FALSE}
+  #create conda env. and install tools
+conda create -n tophat_env \
+  tophat=2.0.14 \
+  bowtie2 \
+  cufflinks \
+  cuffdiff
+
+  
+conda activate tophat_env
+
+```
+
+5. multiQC reports
+
+```{bash, eval=FALSE}
+#install multiqc in activated conda environment
+conda install -c bioconda multiqc
+#from the fastq file directory run:
+multiqc .
+
+```
+
+
+6. Generate index files with bowtie
+
+```{bash, eval=FALSE}
+mkdir yeastGenomeIndex_bowtie
+#from E-MTAB-7657_clean (in the hpc)
+
+bowtie2-build Saccharomyces_cerevisiae.R64-1-1.dna.toplevel.fa yeastGenomeIndex_bowtie/yeast
+
+```
+
+
+7. alignment script 
+  a. create results directory 
+  b. create nano document for alignment script
+  c. ensure file names in results directory iterate and created through each of the 54 fastq files alignment (run in an array)
+  
+
+```{bash, eval=FALSE}
+#create directory to put results of alignment
+mkdir tophat_results 
+nano tophatalign.sh
+ #opens the tophatalign.sh document 
+
+#!/bin/bash
+#SBATCH --job-name=tophat_align
+#SBATCH --output=tophat_results/logs/tophat.out
+
+#create an error log file to record account of error
+#SBATCH --error=tophat_results/logs/tophat.err 
+#SBATCH --time=12:00:00
+#SBATCH --mem=16G
+#SBATCH --cpus-per-task=4
+#SBATCH --array=1-54 #iterate through 54 fastq files
+
+#load module environment 
+module load miniconda3
+source activate tophat_env
+
+#create path to fastq files
+FASTQ_DIR=/scratch/grp/msc_appbio/containersPipelines/svj_grp/E-MTAB-7657_clean/fastq
+GENOME_DIR=/scratch/grp/msc_appbio/containersPipelines/svj_grp/E-MTAB-7657_clean/yeastGenomeIndex_bowtie/yeast
+GTF_FILE=/scratch/grp/msc_appbio/containersPipelines/svj_grp/E-MTAB-7657_clean/yeastGenome/Saccharomyces_cerevisiae.R64-1-1.110.NCnames.gtf
+OUTPUT_DIR=/scratch/grp/msc_appbio/containersPipelines/svj_grp/E-MTAB-7657_clean/tophat_results
+
+#Get filename corresponding to SLURM_ARRAY_TASK_ID 
+FASTQ_FILE=$(ls $FASTQ_DIR/*.fastq.gz | sed -n "${SLURM_ARRAY_TASK_ID}p")
+BASENAME=$(basename $FASTQ_FILE .fastq.gz)
+
+#make output directory for each of the array samples 
+mkdir -p $OUTPUT_DIR/$BASENAME
+
+#run tophat
+tophat -G $GTF_FILE -o $OUTPUT_DIR/$BASENAME $GENOME_DIR $FASTQ_FILE
+
+#exit nano document 
+sbatch tophatalign.sh
+
+#results should be in the tophat_results directory under each fastq file name (ERR*) is a directory with the corresponding accepted_hits.bam file.
+```
+
+8. FPKM cufflink scipt 
+  a. create a mask rRNA file to ignore all rRNA alignements and mappings (remove noise)
+  a. create a nano document called: cufflinks.sh
+  b. run an sbatch to create FPKM files in the corresponding output directory
+  
+```{bash, eval=FALSE}
+#create mask file: rRNA_mask.gtf 
+grep -i "rRNA" Saccharomyces_cerevisiae.R64-1-1.110.gtf > rRNA_mask.gtf
+
+#!/bin/bash
+#SBATCH --job-name=cufflinks
+#SBATCH --output=cufflinks.out
+#SBATCH --error=cufflinks.err
+#SBATCH --cpus-per-task=8
+#SBATCH --time=08:00:00
+#SBATCH --partition=cpu
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate tophat_env
+
+# Set paths
+GTF=/scratch/grp/msc_appbio/containersPipelines/svj_grp/E-MTAB-7657_clean/yeastGenome/Saccharomyces_cerevisiae.R64-1-1.110.NCnames.gtf
+MASK=/scratch/grp/msc_appbio/containersPipelines/svj_grp/E-MTAB-7657_clean/yeastGenome/rRNA_mask.gtf
+OUTDIR=/scratch/grp/msc_appbio/containersPipelines/svj_grp/E-MTAB-7657_clean/cufflinks_out # output directory where the FPKM files are saved)
+BAMDIR=/scratch/grp/msc_appbio/containersPipelines/svj_grp/E-MTAB-7657_clean/tophat_results
+
+mkdir -p $OUTDIR
+
+# Loop over all BAM files from the tophat_results directories 
+for BAM in $BAMDIR/*/accepted_hits.bam; do # for loop to iterate over all 54 fastq files
+  # the */accepted_hits.bam implies the file name changes in the tophat_results directory but the .bam file name does not
+    SAMPLE=$(basename $(dirname $BAM))
+    SAMPLE_OUT=$OUTDIR/$SAMPLE # save the output sample in another directory called cufflinks_out (mentioned in file pathways)&create another direcotry with the file name and label
+    mkdir -p $SAMPLE_OUT # create output directory of sample name in the output directory: cufflinks_out
+    
+    #cufflinks script below
+    cufflinks \  
+      # quantification: upper quartile normalisation - mentioned in the paper
+      --upper-quartile-norm \
+      #create mask file earlier: rRNA_mask.gtf to ignore noise
+      --mask-file $MASK \
+      # reference genome
+      -G $GTF \
+      #use 8 cpue threads
+      -p 8 \
+      #output directory for output FPKM files
+      -o $SAMPLE_OUT \
+      $BAM
+done
+
+#run the script and check its progress with sbatch and squeue --me
+sbatch cufflinks.sh
+
+```
+
+## SET UP FOR CUFFDIFF AND CUFFLINKS 
+  1. locate and scp the sdrf file (this corresponds fastq file with the condition it was from (6h, 14h, 26h))
+  2. create 3 seperate ttxt documents which list the names of the fastq files which belong to each of the 3 conditions.
+  3. extract all bam files from tophat_results/ERR* directories, rename and place in new directory BAM_files 
+```{bash, eval=FALSE}
+#from the E-MTAB-7657_clean directory run:
+wget https://www.ebi.ac.uk/biostudies/files/E-MTAB-7657/E-MTAB-7657.sdrf.txt
+
+#create 3 condition text files 
+grep -i "6h" E-MTAB-7657.sdrf.txt | grep -o "[A-Za-z0-9._-]*\.fastq\.gz" > 6h_bam.txt
+grep -i "14h" E-MTAB-7657.sdrf.txt | grep -o "[A-Za-z0-9._-]*\.fastq\.gz" > 14h_bam.txt
+grep -i "26" E-MTAB-7657.sdrf.txt | grep -o "[A-Za-z0-9._-]*\.fastq\.gz" > 26h_bam.txt
+
+#create BAM_files directory, rename bam files, add to directory 
+mkdir BAM_files
+for f in tophat_results/*/accepted_hits.bam; do
+    sample=$(basename "$(dirname "$f")")
+    cp "$f" "BAM_files/${sample}.bam"
+done
+```
+
+
+9. Cuffdiff script to show differential gene expression, FPKM, isoforms, alignments etc. = QUANTIFICATION 
+	a. mask file (seperate)
+	b. upper quartile normalisation (explain)
+```{bash, eval=FALSE}
+#!/bin/bash
+
+#SBATCH --job-name=cuffdiff
+#SBATCH --cpus-per-task=6
+#SBATCH --mem=16G
+#SBATCH --time=06:00:00
+
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate tophat_env
+
+GTF="/scratch/grp/msc_appbio/containersPipelines/svj_grp/E-MTAB-7657_clean/yeastGenome/Saccharomyces_cerevisiae.R64-1-1.110.NCnames.gtf"
+BAMDIR="/scratch/grp/msc_appbio/containersPipelines/svj_grp/E-MTAB-7657_clean/BAM_files"
+MASK="/scratch/grp/msc_appbio/containersPipelines/svj_grp/E-MTAB-7657_clean/yeastGenome/rRNA_mask.gtf"
+
+# turn the previously made list files into comma seperated files for cuffdiff to iterate through [AI assisted for conversion of text file to comma seperated lists]
+BAM6=$(awk -v d="$BAMDIR/" '{print d $1}' 6h_bam.txt | paste -sd ",")
+BAM14=$(awk -v d="$BAMDIR/" '{print d $1}' 14h_bam.txt | paste -sd ",")
+BAM26=$(awk -v d="$BAMDIR/" '{print d $1}' 26h_bam.txt | paste -sd ",")
+
+
+# Run CUFFDIFF comparisons ()
+cuffdiff --upper-quartile-norm -M $MASK \
+  -o cuffdiff_6v14 -L 6h,14h $GTF $BAM6 $BAM14
+
+cuffdiff --upper-quartile-norm -M $MASK \
+  -o cuffdiff_6v26 -L 6h,26h $GTF $BAM6 $BAM26
+
+cuffdiff --upper-quartile-norm -M $MASK \
+  -o cuffdiff_14v26 -L 14h,26h $GTF $BAM14 $BAM26
+  
+```
+
+
+9. seperate scripts of DEG + FPKM from 3 conditions into seperate files 
+  a. ensure that when they are copied into the new files they are renamed to know which conditions are associated with the file
+```{bash, eval=FALSE}
+# this is done form the cuff_diff_runs directory in E-MTAB-7657_clean
+
+mkdir FPKM
+#for downstream plotting - only 2 fpkm files are needed (used in the heatmap plot 1c)
+mv cuffdiff_14v26/genes.fpkm_tracking FPKM/fpkm_26
+
+mv cuffdiff_6v14/genes.fpkm_tracking FPKM/fpkm6v14
+
+mkdir DEG #(differentially expressed genes - used for plot 1B)
+#move all gene_exp.diff files from the 3 condition directories - they are all needed for plotting the venn diagram (dig. 1B)
+  # rename it too - this way they are easily distinguished
+
+mv cuffdiff_14v26/gene_exp.diff DEG/gene_exp_14vs26.diff
+
+mv cuffdiff_6v14/gene_exp.diff DEG/gene_exp_6vs14.diff
+
+mv cuffdiff_6v26/gene_exp.diff DEG/gene_exp_6vs26.diff
+
+
+```
+
+
+10. SCP into local directory 
+  a. local directory: cloud_computing - SCP FPKM2 and DEG into this file
+
+```{bash, eval=FALSE}
+scp k22031154@hpc.create.kcl.ac.uk:/scratch/grp/msc_appbio/containersPipelines/svj_grp/E-MTAB-7657_clean/cuffdiff_run_1/FPKM2 /c/Users/jagmeet/cloud_computing/.
+
+scp k22031154@hpc.create.kcl.ac.uk:/scratch/grp/msc_appbio/containersPipelines/svj_grp/E-MTAB-7657_clean/cuffdiff_run_1/DEG /c/Users/jagmeet/cloud_computing/.
+
+#scp files into local direcotry for next step of pipeline: data cleaning, management and visualisation
+```
+
+## PREP for visualisation ##
+11.Import, view, analyse and clean files - read for plotting
+  a. read in files (ensure file types and deliminators are correct)
+  b. ensure correct packages and libraries are installed (bioconductor, tidyverse  and org.Sc.sgd.db)
+    i. org.Sc.sgd.db - this is a library which maps yeast common gene names to corresponding yeast ORF identifiers (which is how they are             identifed in the FPKM files) - used later. 
+  c. extract columns of data which are necessary for plotting (prefiltering)
+  d. SCP and download GO-annotation file 
+    i. used to filter the DEF  to the Gluconeogenesis (GO:0006094) specific ones (for plot C) - plotted downstream.
+  e. plot 
+    
+```{r, message=FALSE, warning=FALSE}
+library(VennDiagram)
+library(tidyverse)
+library(readr)
+library(dplyr)
+library(org.Sc.sgd.db)
+
+#set working directory to scp file location
+setwd("~/results_cloud_computing")
+```
+
+
+#ESTABLISHING FILE PATHWAYS 
+- navigate through the local directory (from my machine) to locate the SCP'd files from the HPC post alignment.
+
+```{r}
+
+#file pathway for DEG data
+file_path <- "C:/Users/jagmeet/results_cloud_computing/DEG/gene_exp_14vs26.diff"
+diff_data14vs26 <- read.delim(
+    file = file_path, 
+    header = TRUE, 
+    sep = "\t", 
+    stringsAsFactors = FALSE
+)
+
+#file pathways for FPKM6v14
+file_path_1 <- "C:/Users/jagmeet/results_cloud_computing/FPKM2/fpkm6v14"
+
+FPKM6v14 <- read.table(
+    file = file_path_1, 
+    header = TRUE, 
+    sep = "\t",  # Instructs R to use any whitespace (spaces/tabs) as the delimiter
+    stringsAsFactors = FALSE 
+)
+
+#file pathways for FPKM14v26
+file_path_2 <- "C:/Users/jagmeet/results_cloud_computing/FPKM2/fpkm26"
+
+FPKM14v26 <- read.table(
+    file = file_path_2, 
+    header = TRUE, 
+    sep = "\t",  # Instructs R to use any whitespace (spaces/tabs) as the delimiter
+    stringsAsFactors = FALSE 
+)
+
+# file pathway for genome annotation file:
+file_path <- "C:/Users/jagmeet/results_cloud_computing/gene_association.sgd.gaf" 
+
+go_annotation <- read_tsv(
+    file = file_path, 
+    col_names = FALSE,       
+    comment = "!", # Skips some unnecessary metadata lines + keep info lines
+    show_col_types = FALSE   
+)
+```
+
+
+# File cleaning and normalisation
+  - Pull out all information from GO_annotation file - regarding gluconeogenesis (via code given in paper - GO: 0006094)
+    - the file contained columns headers with prefix 'X' - so we will index and work with those.
+    
+    # org.Sc.sgd.db - library required for using and converting ORF_id to gene_id - in 
+
+```{r}
+#Cleaning GO_annotation file
+gluconeo_common_names_all <- go_annotation %>%
+  mutate(
+    # X5 contains the GO Term ID (GO:0006094)
+    GO_Term_Check = trimws(X5), 
+    # X3 contains the Common Gene Name (e.g., GPC1)
+    Common_Name = trimws(X3) 
+  ) %>%
+  filter(GO_Term_Check == "GO:0006094") %>%
+  pull(Common_Name) %>%
+  unique()
+as.data.frame(gluconeo_common_names_all) # convert to dataframe for easier use
+
+#Cleaning DEG file (14v26) + normalise it
+deg_test_id <- diff_data14vs26 %>%
+  filter(q_value < 0.05) %>% 
+  pull(test_id) %>% 
+  trimws() %>% 
+  toupper() %>% # Force to uppercase 
+  unique()
+view (diff_data14vs26)
+## deg_common_names = ORF_ID's this does NOT match the go_annotation file SO CONVERT TO STANDARD GENE SYMBOLS
+
+test_id_to_gene_symbol <- mapIds(
+  org.Sc.sgd.db, # using the package to match up gene_id and OFD_id
+  keys = deg_test_id, 
+  keytype="ORF",
+  column="GENENAME", # use it to match with the genename
+  multiVals = "first"
+) 
+
+deg_table <- tibble( # create dataframe synonymous object - tibble 
+  test_id = names(test_id_to_gene_symbol), # column 1 - created using pre-existing object 
+  gene_symbol = toupper(unname(test_id_to_gene_symbol)) # column 2 - created using gene_symbol - origonal values from object and convert to upper case (normalise)
+) %>%
+  filter(!is.na(gene_symbol)) # check for any missing values (NA's) 
+```
+
+#FIND INTERSECTS
+created the deg_table gene_symbol column - this will have 17 gluconeogenesis genes of interest
+  - Check if there is an overlap in the 17 gene names with the cleaned gene ontology anatation file.
+
+```{r}
+
+final_17_genes <- intersect(deg_table$gene_symbol, gluconeo_common_names_all)
+final_17_genes <- as.list(final_17_genes)
+
+print(paste("Number of final genes for Plot C:", length(final_17_genes)))
+
+## all X3 common_names in go_annotation which correspond to GO:0006094 = filtered out + intersected with gene symbols in DEG
+
+# THIS SHOWED 17 INTERSECTS!! = this is TRUE
+
+#get test ID's
+
+test_ids <- deg_table %>%
+  filter(gene_symbol %in% final_17_genes) %>%
+  pull(test_id) %>%
+  trimws()
+# since the FPKM files do not have gene_symbol columns in the files, these must be cross referenced with the DEG file which has gene symbol and test_id (tracking_id in FPKM)
+  
+
+
+#length(test_ids)
+```
+
+# CREATING THE BRIDGE AND FINDING THE FPKM CORRESPONDING GENE DATA
+  1. import all FPKM files which have hours 6,14,26hr repetitions 
+  2. clean - matching up tracking_id with test_id's (ensuring the 17 gluconeogenesis genes exist in the FPKM files)
+  3. slect the following columns from the FPKM files:
+      tracking_id, 
+      condition, 
+      replicate, 
+      FPKM
+  4. create object: fpkm_long_clean which has data from cleaned FPKM files
+  5. create matrix format of FPKM to ensure that all data can be transposed easily. (for 3 conditions use reps 1-->3)
+  6. Z transform the data (according to PLOT1C)
+  7. transpose data for plotting in the next segment.
+
+
+```{r}
+#filter 6 and 14h data 
+FPKM6v14_clean <- FPKM6v14 %>%
+  filter(
+    tracking_id %in% test_ids, 
+    replicate %in% c(0,1,2) # select only the first 3 replicates
+  )%>%
+  dplyr::select(tracking_id, condition, replicate, FPKM)
+
+FPKM14v26_clean <- FPKM14v26 %>%
+  filter(
+    tracking_id %in% test_ids,
+    replicate %in% c(0,1,2),
+    condition == "26h" # only keep 26hr data from file
+  ) %>%
+  dplyr::select(tracking_id, condition, replicate, FPKM)
+
+
+fpkm_long_clean <- bind_rows(FPKM6v14_clean, FPKM14v26_clean)
+
+fpkm_long_clean<- fpkm_long_clean%>%
+  distinct(tracking_id, condition, replicate, .keep_all =TRUE)%>%
+  dplyr::left_join(
+    deg_table %>% dplyr::select(test_id, gene_symbol),
+    by = c("tracking_id" = "test_id")
+  )
+
+
+fpkm_heatmap_matrix <- fpkm_long_clean %>%
+  # Create the new column header names (e.g., "6h_rep1")
+  dplyr::mutate(
+    rep_col_name = paste0(condition, "_rep", replicate + 1)
+  ) %>%
+  #  new 'rep_col_name' to define the column headers
+  pivot_wider(
+    id_cols = c(tracking_id, gene_symbol), # Keep identifiers as rows
+    names_from = rep_col_name,            # Use the new descriptive headers
+    values_from = FPKM
+  )%>%
+  #Clean for matrix conversion
+  tibble::column_to_rownames(var = "gene_symbol") %>%
+  dplyr::select(-tracking_id)%>% ## remove the tracking iD its no longer needed - it was a reference link 
+  as.matrix()
+
+#head(fpkm_heatmap_matrix)
+
+
+
+```
+
+#BUILD PLOTC
+
+```{r, message=FALSE, warning=FALSE}
+library(pheatmap)
+
+FPKM_scaled_matrix <-t(scale(t(fpkm_heatmap_matrix)))
+FPKM_scaled_matrix[is.na(FPKM_scaled_matrix)] <- 0
+FPKM_scaled_matrix[is.infinite(FPKM_scaled_matrix)] <- 0
+
+# order the rows of 17 genes according to figure 1C in the paper
+row_order <- c("TDH3", "FBA1", "GPM1", "TPI1", "PGI1", "ENO1", "PGK1", "TDH2", "FBP1", "ERT1", "SDL1", "GPM3", "GPM2","TDH1","MDH2","PYC1", "PCK1")
+#ensure the row_order matches with the order of the rows in the scaled matrix
+FPKM_ordered <- match(row_order, rownames(FPKM_scaled_matrix))
+
+# order the rows according to the object provided above.
+FPKM_scaled_matrix <- FPKM_scaled_matrix[FPKM_ordered, ]
+
+pheatmap(
+  FPKM_scaled_matrix,
+  cluster_rows = FALSE, 
+  cluster_cols= FALSE,
+  scale = "none",
+  fontsize = 8, 
+  main = "HeatMap (PLOTC - reproduced); Gluconeogenesis (GO: 0006094) condition scores"
+)
+
+
+
+```
+
+# BUILD PLOT B
+  1. import all files 
+  2. clean all files according to the requirements for PlotB (q_value significance) + unique test_ids
+  3. import library (Venn.diagram)
+  4. plot and save diagram as png.
+  
+
+
+```{r}
+file_path <- "C:/Users/jagmeet/results_cloud_computing/DEG/gene_exp_14vs26.diff"
+
+deg14v26 <- read.delim(
+    file = file_path, 
+    header = TRUE, 
+    sep = "\t", 
+    stringsAsFactors = FALSE
+)
+#view(deg14v26[1:10, ])
+
+deg14v26 <- deg14v26 %>%
+  filter(q_value <= 0.05) %>%
+  pull(test_id)%>%
+  unique()
+
+
+file_path <- "C:/Users/jagmeet/results_cloud_computing/DEG/gene_exp_6vs14.diff"
+deg6v14 <- read.delim(
+    file = file_path, 
+    header = TRUE, 
+    sep = "\t", 
+    stringsAsFactors = FALSE
+)
+
+deg6v14 <- deg6v14 %>%
+  filter(q_value<=0.05) %>%
+  pull(test_id)%>%
+  unique()
+
+file_path <- "C:/Users/jagmeet/results_cloud_computing/DEG/gene_exp_6vs26.diff"
+deg6v26 <- read.delim(
+    file = file_path, 
+    header = TRUE, 
+    sep = "\t", 
+    stringsAsFactors = FALSE
+)
+deg6v26 <- deg6v26 %>%
+  filter(q_value <= 0.05) %>%
+  pull(test_id)%>%
+  unique()
+
+
+venn.plot <- venn.diagram( 
+  x = list(deg6v26, deg6v14, deg14v26),
+  category.names = c("6h vs 26h", "6h vs 14h", "14h vs 26h"),
+  filename = "PlotB_VennDiagram_DEGs.png",
+  imagetype = "png",
+  #filename = NULL,
+  #output = TRUE,
+  col = "transparent",
+  fill = c("#FFC0CB", "#B3DE69", "#B3CDE3"),
+  alpha = 0.65,
+  cex = 1.5, 
+  cat.cex = 1.2
+)
+
+```
+
+13. LINK FOR GITHUB REPOSITORY PROVIDED BELOW - a star alignmentw as run as a comparison to see how the results would vary
+
+https://github.com/jag5m33/cloud_computing.git
+
+This is the link to github repository, it also contains the star alignment scripts and counts file
+The feature counts pipeline is better than the TopHat/Bowtie2 due to the faster more efficient alignment, increased degree of accuracy, and the splice junction detection is more detailed. The differenc ein the results of both aligners is seen in STAR's cleaner alignment and counts process. The ability to produce precise accuracy coutns file for statstical analysis in one dedicated file make the aligner easier to use than Tophat which breaks it into the 3 conditions into seperate files which require downstream processing and further cleaning.
+As mentioned in the paper, in the circumstances were there was more time, the results of the star alignement could be visualised in R using DeSeq2 (R package) and the numerical values compared.
+
