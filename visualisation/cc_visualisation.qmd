@@ -294,13 +294,11 @@ venn.plot <- venn.diagram(
   #filename = NULL,
   output = TRUE,
   col = "transparent",
-  fill = c("#FFC0CB", "#00FF00", "#800080"),
+  fill = c("#FFC0CB", "#90EE90", "#CBC3E3"),
   alpha = 0.65,
   cex = 1.5, 
   cat.cex = 1.2
 )
-
-
 
 ```
 
